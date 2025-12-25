@@ -3,7 +3,7 @@
 # ====================================================
 #  转发脚本 Script v1.7 By Shinyuz
 #  快捷键: zf
-#  更新内容: 修复 iptables 状态检测逻辑 (精准检测服务状态)
+#  更新内容: 修复快捷键提示信息的排版 (严格空一行)
 # ====================================================
 
 # 颜色定义
@@ -40,7 +40,10 @@ set_shortcut() {
     if [ ! -f "/usr/bin/zf" ]; then
         ln -sf "$SCRIPT_PATH" /usr/bin/zf
         chmod +x /usr/bin/zf
-        echo -e "\n${GREEN}快捷键 'zf' 已设置成功！以后输入 zf 即可打开面板。${PLAIN}\n"
+        # 修正排版：使用单独的 echo "" 确保上方只空一行
+        echo ""
+        echo -e "${GREEN}快捷键 'zf' 已设置成功！以后输入 zf 即可打开面板。${PLAIN}"
+        # 修正排版：移除末尾 \n，因为 show_menu 开头已有 echo ""，确保下方只空一行
     fi
 }
 
@@ -50,17 +53,13 @@ enable_forwarding() {
     sysctl -p /etc/sysctl.d/ip_forward.conf >/dev/null 2>&1
 }
 
-# 修复后的状态检测函数
 check_status() {
-    # Check Realm
     if systemctl is-active --quiet realm; then
         realm_status="${GREEN}running${PLAIN}"
     else
         realm_status="${RED}stopped${PLAIN}"
     fi
 
-    # Check Iptables (改用检测服务状态)
-    # Debian/Ubuntu 使用 netfilter-persistent, CentOS 使用 iptables
     if systemctl is-active --quiet netfilter-persistent || systemctl is-active --quiet iptables; then
         iptables_status="${GREEN}running${PLAIN}"
     else
@@ -70,7 +69,7 @@ check_status() {
 
 update_script() {
     echo -e "\n${YELLOW}正在检查更新...${PLAIN}"
-    echo -e "${GREEN}当前版本 v1.7 (状态检测修复版)${PLAIN}"
+    echo -e "${GREEN}当前版本 v1.7 (排版修正版)${PLAIN}"
     echo ""
     read -p "按回车键继续..."
 }
