@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # ====================================================
-#  转发脚本 Script v1.9 By Shinyuz
+#  转发脚本 Script v1.7 By Shinyuz
 #  快捷键: zf
-#  更新内容: 优化卸载内容的警告排版
+#  更新内容: 修复 iptables 状态检测逻辑 (精准检测服务状态)
 # ====================================================
 
 # 颜色定义
@@ -50,14 +50,18 @@ enable_forwarding() {
     sysctl -p /etc/sysctl.d/ip_forward.conf >/dev/null 2>&1
 }
 
+# 修复后的状态检测函数
 check_status() {
+    # Check Realm
     if systemctl is-active --quiet realm; then
         realm_status="${GREEN}running${PLAIN}"
     else
         realm_status="${RED}stopped${PLAIN}"
     fi
 
-    if lsmod | grep -q "ip_tables" || iptables -L >/dev/null 2>&1; then
+    # Check Iptables (改用检测服务状态)
+    # Debian/Ubuntu 使用 netfilter-persistent, CentOS 使用 iptables
+    if systemctl is-active --quiet netfilter-persistent || systemctl is-active --quiet iptables; then
         iptables_status="${GREEN}running${PLAIN}"
     else
         iptables_status="${RED}stopped${PLAIN}"
@@ -66,7 +70,7 @@ check_status() {
 
 update_script() {
     echo -e "\n${YELLOW}正在检查更新...${PLAIN}"
-    echo -e "${GREEN}当前版本 v1.9 (优化卸载提示排版)${PLAIN}"
+    echo -e "${GREEN}当前版本 v1.7 (状态检测修复版)${PLAIN}"
     echo ""
     read -p "按回车键继续..."
 }
@@ -865,7 +869,7 @@ manage_iptables_menu() {
 show_menu() {
     check_status
     echo ""
-    echo -e "${GREEN}========= 转发脚本 Script v1.9 By Shinyuz =========${PLAIN}"
+    echo -e "${GREEN}========= 转发脚本 Script v1.7 By Shinyuz =========${PLAIN}"
     echo ""
     echo -e " realm: ${realm_status}"
     echo ""
