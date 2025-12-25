@@ -3,7 +3,7 @@
 # ====================================================
 #  转发脚本 Script v1.7 By Shinyuz
 #  快捷键: zf
-#  更新内容: 移除所有手动换行，完美适配 1 行间距
+#  更新内容: 完美修复首次运行时的空行间距
 # ====================================================
 
 # 颜色定义
@@ -40,7 +40,7 @@ set_shortcut() {
     if [ ! -f "/usr/bin/zf" ]; then
         ln -sf "$SCRIPT_PATH" /usr/bin/zf
         chmod +x /usr/bin/zf
-        # 修正：移除所有 echo ""，紧贴上一条命令输出，只靠自然的系统换行形成 1 行间隔
+        # 移除了这里的 echo ""，利用上一条命令(wget)的结束换行来实现只空一行
         echo -e "${GREEN}快捷键 'zf' 已设置成功！以后输入 zf 即可打开面板。${PLAIN}"
     fi
 }
@@ -67,7 +67,7 @@ check_status() {
 
 update_script() {
     echo -e "\n${YELLOW}正在检查更新...${PLAIN}"
-    echo -e "${GREEN}当前版本 v1.7 (最终排版修正)${PLAIN}"
+    echo -e "${GREEN}当前版本 v1.7 (排版完美版)${PLAIN}"
     echo ""
     read -p "按回车键继续..."
 }
