@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # ====================================================
-#  转发脚本 Script v1.8 By Shinyuz
+#  转发脚本 Script v1.9 By Shinyuz
 #  快捷键: zf
-#  更新内容: 移除冗余注释，代码纯净版
+#  更新内容: 优化卸载界面的警告排版
 # ====================================================
 
 # 颜色定义
@@ -66,7 +66,7 @@ check_status() {
 
 update_script() {
     echo -e "\n${YELLOW}正在检查更新...${PLAIN}"
-    echo -e "${GREEN}当前版本 v1.8 (纯净版)${PLAIN}"
+    echo -e "${GREEN}当前版本 v1.9 (优化卸载提示排版)${PLAIN}"
     echo ""
     read -p "按回车键继续..."
 }
@@ -768,8 +768,11 @@ uninstall_iptables_service() {
 uninstall_all() {
     echo ""
     echo -e "${RED}警告：此操作将执行以下所有动作：${PLAIN}"
+    echo ""
     echo "1. 卸载 Realm (删除文件、配置、备注和服务)"
+    echo ""
     echo "2. 清空 Iptables 转发规则"
+    echo ""
     echo "3. 删除本脚本及 'zf' 快捷键"
     echo ""
     read -p "确定要彻底卸载脚本及所有组件吗？(y/n): " choice
@@ -862,7 +865,7 @@ manage_iptables_menu() {
 show_menu() {
     check_status
     echo ""
-    echo -e "${GREEN}========= 转发脚本 Script v1.8 By Shinyuz =========${PLAIN}"
+    echo -e "${GREEN}========= 转发脚本 Script v1.9 By Shinyuz =========${PLAIN}"
     echo ""
     echo -e " realm: ${realm_status}"
     echo ""
