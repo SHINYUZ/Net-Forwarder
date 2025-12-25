@@ -769,9 +769,9 @@ uninstall_all() {
     echo ""
     echo -e "${RED}警告：此操作将执行以下所有动作：${PLAIN}"
     echo ""
-    echo "1. 卸载 Realm (删除文件、配置、备注和服务)"
+    echo "1. 卸载 realm (删除文件、配置、备注和服务)"
     echo ""
-    echo "2. 清空 Iptables 转发规则"
+    echo "2. 清空 iptables 转发规则"
     echo ""
     echo "3. 删除本脚本及 'zf' 快捷键"
     echo ""
@@ -925,3 +925,4 @@ set_shortcut
 while true; do
     show_menu
 done
+
