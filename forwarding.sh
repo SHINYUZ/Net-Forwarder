@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # ====================================================
-#  转发脚本 Script v1.7 By Shinyuz
+#  转发脚本 Script v1.8 By Shinyuz
 #  快捷键: zf
-#  更新内容: 首次运行自动安装 realm 和 iptables
+#  更新内容: 修复 iptables 自动安装检测逻辑 (检测服务而非命令)
 # ====================================================
 
 # 颜色定义
@@ -68,7 +68,7 @@ check_status() {
 
 update_script() {
     echo -e "\n${YELLOW}正在检查更新...${PLAIN}"
-    echo -e "${GREEN}当前版本 v1.7 (自动安装依赖版)${PLAIN}"
+    echo -e "${GREEN}当前版本 v1.8 (检测逻辑修复版)${PLAIN}"
     echo ""
     read -p "按回车键继续..."
 }
@@ -925,12 +925,18 @@ show_menu() {
 check_root
 set_shortcut
 
-# 首次运行自动安装依赖
 if [ ! -f "$REALM_PATH" ]; then
     install_realm
 fi
-if ! command -v iptables &> /dev/null; then
-    install_iptables_env
+
+if [ -f /etc/debian_version ]; then
+    if [ ! -f /lib/systemd/system/netfilter-persistent.service ] && [ ! -f /etc/systemd/system/netfilter-persistent.service ]; then
+        install_iptables_env
+    fi
+elif [ -f /etc/redhat-release ]; then
+    if [ ! -f /usr/lib/systemd/system/iptables.service ] && [ ! -f /etc/systemd/system/iptables.service ]; then
+        install_iptables_env
+    fi
 fi
 
 while true; do
