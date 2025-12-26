@@ -3,7 +3,7 @@
 # ====================================================
 #  转发脚本 Script v1.7 By Shinyuz
 #  快捷键: zf
-#  更新内容: 优化下载失败时的排版 + 卸载提示小写化
+#  更新内容: 界面文案精简 (移除版本说明后缀)
 # ====================================================
 
 # 颜色定义
@@ -68,7 +68,7 @@ check_status() {
 
 update_script() {
     echo -e "\n${YELLOW}正在检查更新...${PLAIN}"
-    echo -e "${GREEN}当前版本 v1.7 (完美排版修正版)${PLAIN}"
+    echo -e "${GREEN}当前版本 v1.7${PLAIN}"
     echo ""
     read -p "按回车键继续..."
 }
@@ -111,17 +111,16 @@ install_realm() {
     echo -e "\n${YELLOW}正在安装 realm...${PLAIN}\n"
     
     VERSION="v2.7.0"
-    URL="https://github.com/zhboner/realm/releases/download/$VERSION/realm-$REALM_ARCH.tar.gz"
+    # 使用 ghproxy 加速，兼容 IPv4/IPv6
+    URL="https://ghproxy.net/https://github.com/zhboner/realm/releases/download/$VERSION/realm-$REALM_ARCH.tar.gz"
     
     wget -O realm.tar.gz $URL
     
     if [ $? -ne 0 ]; then
-        # 修正：下载失败后的排版
         echo "" 
         echo -e "${RED}下载失败 (404 或 网络错误)！已停止安装。${PLAIN}"
         echo ""
         echo -e "${RED}请检查网络连接或 GitHub 是否可访问。${PLAIN}"
-        # 修正：这里不再需要 echo ""，因为 show_menu 开头自带了一个空行
         rm -f realm.tar.gz
         return
     fi
@@ -775,10 +774,8 @@ uninstall_all() {
     echo ""
     echo -e "${RED}警告：此操作将执行以下所有动作：${PLAIN}"
     echo ""
-    # 修正：realm 小写
     echo "1. 卸载 realm (删除文件、配置、备注和服务)"
     echo ""
-    # 修正：iptables 小写
     echo "2. 清空 iptables 转发规则"
     echo ""
     echo "3. 删除本脚本及 'zf' 快捷键"
