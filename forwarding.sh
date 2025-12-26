@@ -115,10 +115,13 @@ get_latest_version() {
 
 install_realm() {
     check_arch # 确保已定义 REALM_ARCH
-    echo -e "\n${YELLOW}正在准备安装 realm...${PLAIN}\n"
+    echo -e "\n${YELLOW}正在准备安装 realm...${PLAIN}"
+    echo ""  # [空行]
     
     # 1. 智能版本检测与策略选择
     echo -e "正在检测网络环境与最新版本..."
+    echo ""  # [空行]
+
     # 尝试获取在线版本
     ONLINE_VER=$(wget -qO- -T 3 -t 1 "https://api.github.com/repos/zhboner/realm/releases/latest" | grep "tag_name" | head -n 1 | awk -F ":" '{print $2}' | sed 's/\"//g;s/,//g;s/ //g')
     
@@ -126,13 +129,17 @@ install_realm() {
         # 情况A: 成功获取 (IPv4/双栈)
         VERSION="$ONLINE_VER"
         echo -e "检测到最新版本: ${GREEN}${VERSION}${PLAIN}"
+        echo ""  # [空行]
         echo -e "网络策略: ${GREEN}优先官方源${PLAIN}"
+        echo ""  # [空行]
         USE_MIRROR_FIRST=false
     else
         # 情况B: 获取失败 (IPv6 Only)
         VERSION="v2.7.0" # Realm 的保底版本
         echo -e "${YELLOW}无法连接 GitHub API，切换至保底版本: ${VERSION}${PLAIN}"
+        echo ""  # [空行]
         echo -e "网络策略: ${YELLOW}优先镜像源 (IPv6优化)${PLAIN}"
+        echo ""  # [空行]
         USE_MIRROR_FIRST=true
     fi
     
@@ -145,7 +152,8 @@ install_realm() {
     # 2. 执行下载 (根据策略)
     if [[ "$USE_MIRROR_FIRST" == "true" ]]; then
         # === 策略B: 优先镜像 ===
-        echo -e "正在下载 (尝试镜像源)..."
+        echo -e "正在下载..."
+        echo ""  # [空行]
         wget -T 20 -t 2 -O realm.tar.gz "$URL_MIRROR"
         if [ $? -eq 0 ]; then
             DOWNLOAD_SUCCESS=1
@@ -156,7 +164,8 @@ install_realm() {
         fi
     else
         # === 策略A: 优先官方 ===
-        echo -e "正在下载 (尝试官方源)..."
+        echo -e "正在下载..."
+        echo ""  # [空行]
         # 官方源允许静默尝试
         wget -T 10 -t 1 -O realm.tar.gz "$URL_OFFICIAL" >/dev/null 2>&1
         if [ $? -eq 0 ]; then
@@ -175,9 +184,9 @@ install_realm() {
         return
     fi
     
-    echo -e "${GREEN}下载成功！${PLAIN}"
-    
     # 3. 解压安装
+    echo -e "${GREEN}下载成功，正在安装...${PLAIN}"
+    
     tar -xvf realm.tar.gz > /dev/null 2>&1
     if [ ! -f "realm" ]; then
         echo -e "\n${RED}解压失败，未找到 realm 二进制文件！${PLAIN}\n"
@@ -237,6 +246,7 @@ EOF
     systemctl enable realm
     echo ""
     echo -e "${GREEN}realm 安装完成！${PLAIN}"
+    echo ""
 }
 
 add_realm_rule() {
