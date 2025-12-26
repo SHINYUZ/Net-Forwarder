@@ -3,7 +3,7 @@
 # ====================================================
 #  转发脚本 Script v1.7 By Shinyuz
 #  快捷键: zf
-#  更新内容: 界面文案精简 (移除版本说明后缀)
+#  更新内容: 增加多源下载重试机制 (解决纯v6无法下载问题)
 # ====================================================
 
 # 颜色定义
@@ -111,17 +111,33 @@ install_realm() {
     echo -e "\n${YELLOW}正在安装 realm...${PLAIN}\n"
     
     VERSION="v2.7.0"
-    # 使用 ghproxy 加速，兼容 IPv4/IPv6
-    URL="https://ghproxy.net/https://github.com/zhboner/realm/releases/download/$VERSION/realm-$REALM_ARCH.tar.gz"
+    FILENAME="realm-$REALM_ARCH.tar.gz"
     
-    wget -O realm.tar.gz $URL
+    # 定义下载源列表：官方源 -> 镜像源1 -> 镜像源2
+    URL_OFFICIAL="https://github.com/zhboner/realm/releases/download/$VERSION/$FILENAME"
+    URL_MIRROR1="https://mirror.ghproxy.com/https://github.com/zhboner/realm/releases/download/$VERSION/$FILENAME"
+    URL_MIRROR2="https://ghproxy.net/https://github.com/zhboner/realm/releases/download/$VERSION/$FILENAME"
     
-    if [ $? -ne 0 ]; then
+    DOWNLOAD_SUCCESS=0
+
+    # 尝试下载逻辑
+    for URL in "$URL_OFFICIAL" "$URL_MIRROR1" "$URL_MIRROR2"; do
+        echo -e "尝试下载: $URL"
+        wget -O realm.tar.gz "$URL"
+        if [ $? -eq 0 ]; then
+            DOWNLOAD_SUCCESS=1
+            break
+        else
+            echo -e "${RED}下载失败，尝试下一个源...${PLAIN}"
+            rm -f realm.tar.gz
+        fi
+    done
+
+    if [ $DOWNLOAD_SUCCESS -eq 0 ]; then
         echo "" 
         echo -e "${RED}下载失败 (404 或 网络错误)！已停止安装。${PLAIN}"
         echo ""
         echo -e "${RED}请检查网络连接或 GitHub 是否可访问。${PLAIN}"
-        rm -f realm.tar.gz
         return
     fi
     
