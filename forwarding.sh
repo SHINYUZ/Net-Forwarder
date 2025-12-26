@@ -3,7 +3,7 @@
 # ====================================================
 #  转发脚本 Script v1.7 By Shinyuz
 #  快捷键: zf
-#  更新内容: 智能双源切换 (优先官方源，失败自动切加速源)
+#  更新内容: 极致精简排版 + 智能源静默切换
 # ====================================================
 
 # 颜色定义
@@ -105,10 +105,8 @@ del_realm_remark() {
 }
 
 get_latest_version() {
-    # 优先通过官方 API 获取最新版本号
     local version=$(wget -qO- -T 3 -t 1 "https://api.github.com/repos/zhboner/realm/releases/latest" | grep "tag_name" | head -n 1 | awk -F ":" '{print $2}' | sed 's/\"//g;s/,//g;s/ //g')
     if [ -z "$version" ]; then
-        # 如果 API 请求失败（通常是纯v6机器），尝试通过镜像站获取（可选）或直接兜底
         echo "v2.7.0"
     else
         echo "$version"
@@ -122,24 +120,20 @@ install_realm() {
     VERSION=$(get_latest_version)
     FILENAME="realm-$REALM_ARCH.tar.gz"
     
-    # 策略：优先官方源 (URL1)，失败后切镜像源 (URL2)
     URL_OFFICIAL="https://github.com/zhboner/realm/releases/download/$VERSION/$FILENAME"
     URL_MIRROR="https://gh-proxy.com/https://github.com/zhboner/realm/releases/download/$VERSION/$FILENAME"
     
     DOWNLOAD_SUCCESS=0
 
-    # 第一次尝试：官方源
-    wget -T 10 -t 1 -O realm.tar.gz "$URL_OFFICIAL"
+    # 第一次尝试：官方源 (静默尝试)
+    wget -T 5 -t 1 -O realm.tar.gz "$URL_OFFICIAL" &>/dev/null
     if [ $? -eq 0 ]; then
         DOWNLOAD_SUCCESS=1
-        echo -e "${GREEN}下载成功 (官方源)！${PLAIN}"
     else
         # 第二次尝试：镜像源
-        echo -e "${YELLOW}官方源连接超时，正在尝试加速镜像...${PLAIN}"
         wget -T 15 -t 2 -O realm.tar.gz "$URL_MIRROR"
         if [ $? -eq 0 ]; then
             DOWNLOAD_SUCCESS=1
-            echo -e "${GREEN}下载成功 (加速源)！${PLAIN}"
         fi
     fi
 
@@ -150,6 +144,8 @@ install_realm() {
         echo -e "${RED}请检查网络连接，确保机器可访问 GitHub 或其镜像。${PLAIN}"
         return
     fi
+    
+    echo -e "${GREEN}下载成功！${PLAIN}"
     
     tar -xvf realm.tar.gz > /dev/null 2>&1
     if [ ! -f "realm" ]; then
@@ -207,7 +203,6 @@ EOF
 
     systemctl daemon-reload
     
-    # 严格排版：在输出 Created symlink 前空一行
     echo ""
     systemctl enable realm
     
