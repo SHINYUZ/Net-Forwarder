@@ -114,39 +114,70 @@ get_latest_version() {
 }
 
 install_realm() {
-    check_arch
-    echo -e "\n${YELLOW}正在安装 realm...${PLAIN}\n"
+    check_arch # 确保已定义 REALM_ARCH
+    echo -e "\n${YELLOW}正在准备安装 realm...${PLAIN}\n"
     
-    VERSION=$(get_latest_version)
+    # 1. 智能版本检测与策略选择
+    echo -e "正在检测网络环境与最新版本..."
+    # 尝试获取在线版本
+    ONLINE_VER=$(wget -qO- -T 3 -t 1 "https://api.github.com/repos/zhboner/realm/releases/latest" | grep "tag_name" | head -n 1 | awk -F ":" '{print $2}' | sed 's/\"//g;s/,//g;s/ //g')
+    
+    if [[ -n "$ONLINE_VER" ]]; then
+        # 情况A: 成功获取 (IPv4/双栈)
+        VERSION="$ONLINE_VER"
+        echo -e "检测到最新版本: ${GREEN}${VERSION}${PLAIN}"
+        echo -e "网络策略: ${GREEN}优先官方源${PLAIN}"
+        USE_MIRROR_FIRST=false
+    else
+        # 情况B: 获取失败 (IPv6 Only)
+        VERSION="v2.7.0" # Realm 的保底版本
+        echo -e "${YELLOW}无法连接 GitHub API，切换至保底版本: ${VERSION}${PLAIN}"
+        echo -e "网络策略: ${YELLOW}优先镜像源 (IPv6优化)${PLAIN}"
+        USE_MIRROR_FIRST=true
+    fi
+    
     FILENAME="realm-$REALM_ARCH.tar.gz"
-    
     URL_OFFICIAL="https://github.com/zhboner/realm/releases/download/$VERSION/$FILENAME"
     URL_MIRROR="https://gh-proxy.com/https://github.com/zhboner/realm/releases/download/$VERSION/$FILENAME"
     
     DOWNLOAD_SUCCESS=0
 
-    # 第一次尝试：官方源 (静默尝试)
-    wget -T 5 -t 1 -O realm.tar.gz "$URL_OFFICIAL" &>/dev/null
-    if [ $? -eq 0 ]; then
-        DOWNLOAD_SUCCESS=1
-    else
-        # 第二次尝试：镜像源
-        wget -T 15 -t 2 -O realm.tar.gz "$URL_MIRROR"
+    # 2. 执行下载 (根据策略)
+    if [[ "$USE_MIRROR_FIRST" == "true" ]]; then
+        # === 策略B: 优先镜像 ===
+        echo -e "正在下载 (尝试镜像源)..."
+        wget -T 20 -t 2 -O realm.tar.gz "$URL_MIRROR"
         if [ $? -eq 0 ]; then
             DOWNLOAD_SUCCESS=1
+        else
+            echo -e "${YELLOW}镜像源失败，尝试官方源...${PLAIN}"
+            wget -T 5 -t 1 -O realm.tar.gz "$URL_OFFICIAL"
+            if [ $? -eq 0 ]; then DOWNLOAD_SUCCESS=1; fi
+        fi
+    else
+        # === 策略A: 优先官方 ===
+        echo -e "正在下载 (尝试官方源)..."
+        # 官方源允许静默尝试
+        wget -T 10 -t 1 -O realm.tar.gz "$URL_OFFICIAL" >/dev/null 2>&1
+        if [ $? -eq 0 ]; then
+            DOWNLOAD_SUCCESS=1
+        else
+            echo -e "${YELLOW}官方源超时，自动切换镜像源...${PLAIN}"
+            wget -T 15 -t 2 -O realm.tar.gz "$URL_MIRROR"
+            if [ $? -eq 0 ]; then DOWNLOAD_SUCCESS=1; fi
         fi
     fi
 
     if [ $DOWNLOAD_SUCCESS -eq 0 ]; then
         echo "" 
-        echo -e "${RED}下载失败 (网络错误)！已停止安装。${PLAIN}"
-        echo ""
-        echo -e "${RED}请检查网络连接，确保机器可访问 GitHub 或其镜像。${PLAIN}"
+        echo -e "${RED}下载失败！请检查网络连接。${PLAIN}"
+        rm -f realm.tar.gz
         return
     fi
     
     echo -e "${GREEN}下载成功！${PLAIN}"
     
+    # 3. 解压安装
     tar -xvf realm.tar.gz > /dev/null 2>&1
     if [ ! -f "realm" ]; then
         echo -e "\n${RED}解压失败，未找到 realm 二进制文件！${PLAIN}\n"
@@ -202,10 +233,8 @@ WantedBy=multi-user.target
 EOF
 
     systemctl daemon-reload
-    
     echo ""
     systemctl enable realm
-    
     echo ""
     echo -e "${GREEN}realm 安装完成！${PLAIN}"
 }
