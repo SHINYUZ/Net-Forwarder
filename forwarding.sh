@@ -3,7 +3,7 @@
 # ====================================================
 #  转发脚本 Script v1.7 By Shinyuz
 #  快捷键: zf
-#  更新内容: 首次运行强制安装 iptables (不再检测)
+#  更新内容: 优化下载失败时的排版 + 卸载提示小写化
 # ====================================================
 
 # 颜色定义
@@ -40,7 +40,6 @@ set_shortcut() {
     if [ ! -f "/usr/bin/zf" ]; then
         ln -sf "$SCRIPT_PATH" /usr/bin/zf
         chmod +x /usr/bin/zf
-        # 移除上方 echo ""，利用 wget 结束换行，保持完美间距
         echo -e "${GREEN}快捷键 'zf' 已设置成功！以后输入 zf 即可打开面板。${PLAIN}"
     fi
 }
@@ -69,7 +68,7 @@ check_status() {
 
 update_script() {
     echo -e "\n${YELLOW}正在检查更新...${PLAIN}"
-    echo -e "${GREEN}当前版本 v1.7 (强制依赖版)${PLAIN}"
+    echo -e "${GREEN}当前版本 v1.7 (完美排版修正版)${PLAIN}"
     echo ""
     read -p "按回车键继续..."
 }
@@ -117,8 +116,12 @@ install_realm() {
     wget -O realm.tar.gz $URL
     
     if [ $? -ne 0 ]; then
-        echo -e "\n${RED}下载失败 (404 或 网络错误)！已停止安装。${PLAIN}"
-        echo -e "${RED}请检查网络连接或 GitHub 是否可访问。${PLAIN}\n"
+        # 修正：下载失败后的排版
+        echo "" 
+        echo -e "${RED}下载失败 (404 或 网络错误)！已停止安装。${PLAIN}"
+        echo ""
+        echo -e "${RED}请检查网络连接或 GitHub 是否可访问。${PLAIN}"
+        # 修正：这里不再需要 echo ""，因为 show_menu 开头自带了一个空行
         rm -f realm.tar.gz
         return
     fi
@@ -772,9 +775,11 @@ uninstall_all() {
     echo ""
     echo -e "${RED}警告：此操作将执行以下所有动作：${PLAIN}"
     echo ""
-    echo "1. 卸载 Realm (删除文件、配置、备注和服务)"
+    # 修正：realm 小写
+    echo "1. 卸载 realm (删除文件、配置、备注和服务)"
     echo ""
-    echo "2. 清空 Iptables 转发规则"
+    # 修正：iptables 小写
+    echo "2. 清空 iptables 转发规则"
     echo ""
     echo "3. 删除本脚本及 'zf' 快捷键"
     echo ""
@@ -926,8 +931,6 @@ show_menu() {
 check_root
 set_shortcut
 
-# 首次运行自动安装依赖
-# 修改点：只要 realm 没安装，就默认两个都需要安装，不再判断 iptables 命令
 if [ ! -f "$REALM_PATH" ]; then
     install_realm
     install_iptables_env
