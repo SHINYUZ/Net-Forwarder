@@ -39,7 +39,7 @@
 
 ## 📥 一键安装 / 更新
 
-复制以下命令并在 VPS 内执行：
+复制以下命令并在 VPS 执行：
 
 ```bash
 wget -N --no-check-certificate https://raw.githubusercontent.com/Shinyuz/net-forwarder/main/forwarding.sh && chmod +x forwarding.sh && ./forwarding.sh
@@ -140,6 +140,7 @@ Copyright (c) 2025 Shinyuz
 ---
 
 **如果这个脚本对你有帮助，请给一个 ⭐ Star！**
+
 
 
 
