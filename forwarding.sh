@@ -1073,9 +1073,6 @@ set_traffic_quota() {
                 nft add rule inet realm_block input udp dport $port drop
             fi
         else
-            if is_manual_blocked "$port"; then
-                continue
-            fi
             while nft -a list chain inet realm_block input | grep -q "tcp dport $port drop"; do
                 nft delete rule inet realm_block input handle $(nft -a list chain inet realm_block input | grep "tcp dport $port drop" | head -n 1 | awk '{print $NF}') 2>/dev/null
             done
