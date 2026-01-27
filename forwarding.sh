@@ -730,6 +730,11 @@ get_port_name() {
     fi
 }
 
+is_manual_blocked() {
+    local port=$1
+    [[ -f "$TRAFFIC_DIR/manual_block_${port}.conf" ]]
+}
+
 ensure_monitor_timer() {
     cat > "$MONITOR_SERVICE" <<EOF
 [Unit]
@@ -933,6 +938,7 @@ port_action_menu() {
     echo -e ""
     case "$opt" in
         1)
+            rm -f "$TRAFFIC_DIR/manual_block_${port}.conf"
             while nft -a list chain inet realm_block input | grep -q "tcp dport $port drop"; do
                 nft delete rule inet realm_block input handle $(nft -a list chain inet realm_block input | grep "tcp dport $port drop" | head -n 1 | awk '{print $NF}') 2>/dev/null
             done
@@ -947,6 +953,7 @@ port_action_menu() {
             port_action_menu "$port"
             ;;
         2)
+            echo "1" > "$TRAFFIC_DIR/manual_block_${port}.conf"
             if ! nft list chain inet realm_block input | grep -q "tcp dport $port drop"; then
                 nft add rule inet realm_block input tcp dport $port drop
             fi
@@ -1066,6 +1073,9 @@ set_traffic_quota() {
                 nft add rule inet realm_block input udp dport $port drop
             fi
         else
+            if is_manual_blocked "$port"; then
+                continue
+            fi
             while nft -a list chain inet realm_block input | grep -q "tcp dport $port drop"; do
                 nft delete rule inet realm_block input handle $(nft -a list chain inet realm_block input | grep "tcp dport $port drop" | head -n 1 | awk '{print $NF}') 2>/dev/null
             done
@@ -1137,9 +1147,14 @@ reset_traffic_menu() {
     for ((i=0; i<${#r_lport[@]}; i++)); do
         name=$(get_port_name "${r_lport[$i]}")
         port="${r_lport[$i]}"
-        cron=$(crontab -l 2>/dev/null | grep "# reset_${port}")
-        if [[ -n "$cron" ]]; then
-            st_text="每月$(echo $cron|awk '{print $3}')号重置"
+        timer="realm-reset-${port}.timer"
+        if systemctl list-timers --all | grep -q "$timer"; then
+            day=$(systemctl cat "$timer" 2>/dev/null | grep "^OnCalendar=" | awk -F'-' '{print $3}' | awk '{print $1}' | sed 's/^0//')
+            if [[ -n "$day" ]]; then
+                st_text="每月${day}号重置"
+            else
+                st_text="已设置自动"
+            fi
             st_color="${YELLOW}${st_text}${PLAIN}"
         else
             st_text="未设置自动"
@@ -1717,6 +1732,9 @@ if [[ "$1" == "monitor" ]]; then
                 send_tg_msg "$msg"
             fi
         else
+            if is_manual_blocked "$port"; then
+                continue
+            fi
             while nft -a list chain inet realm_block input | grep -q "tcp dport $port drop"; do
                 nft delete rule inet realm_block input handle $(nft -a list chain inet realm_block input | grep "tcp dport $port drop" | head -n 1 | awk '{print $NF}') 2>/dev/null
             done
