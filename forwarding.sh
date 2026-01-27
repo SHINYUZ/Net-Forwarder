@@ -23,6 +23,7 @@ TRAFFIC_DIR="/etc/realm"
 TG_CONF="$TRAFFIC_DIR/tg_notify.conf"
 MONITOR_SERVICE="/etc/systemd/system/forwarding-traffic.service"
 MONITOR_TIMER="/etc/systemd/system/forwarding-traffic.timer"
+RESET_UNIT_DIR="/etc/systemd/system"
 
 check_root() {
     if [ "$EUID" -ne 0 ]; then
@@ -757,6 +758,47 @@ EOF
     systemctl enable --now forwarding-traffic.timer >/dev/null 2>&1
 }
 
+set_reset_timer() {
+    local port=$1
+    local name=$2
+    local day=$3
+    local svc="/etc/systemd/system/realm-reset-${port}.service"
+    local timer="/etc/systemd/system/realm-reset-${port}.timer"
+
+    systemctl disable --now "realm-reset-${port}.timer" >/dev/null 2>&1
+    rm -f "$svc" "$timer"
+
+    if [[ "$day" == "0" ]]; then
+        systemctl daemon-reload
+        return
+    fi
+
+    cat > "$svc" <<EOF
+[Unit]
+Description=Realm Reset Port ${port}
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash $SCRIPT_PATH reset_port_exec $port "$name"
+EOF
+
+    cat > "$timer" <<EOF
+[Unit]
+Description=Realm Reset Port ${port} (monthly)
+
+[Timer]
+OnCalendar=*-*-$(printf "%02d" "$day") 00:00:00
+Persistent=true
+Unit=realm-reset-${port}.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable --now "realm-reset-${port}.timer" >/dev/null 2>&1
+}
+
 show_traffic() {
     mkdir -p "$TRAFFIC_DIR"
     init_nftables
@@ -1179,10 +1221,7 @@ reset_traffic_menu() {
     elif [[ "$op" == "2" ]]; then
         read -p "每月几号(1-31, 0关闭): " d
         echo -e ""
-        (crontab -l 2>/dev/null | grep -v "# reset_${port}") | crontab -
-        if [[ "$d" != "0" ]]; then
-            (crontab -l 2>/dev/null; echo "0 0 $d * * /bin/bash $SCRIPT_PATH reset_port_exec $port \"$name\" >/dev/null 2>&1 # reset_${port}") | crontab -
-        fi
+        set_reset_timer "$port" "$name" "$d"
         echo -e "${GREEN}设置成功${PLAIN}"
         echo -e "" 
         read -n 1 -s -r -p "按键返回..."
