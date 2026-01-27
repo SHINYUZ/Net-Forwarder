@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ====================================================
-#  转发脚本 Script v1.7 By Shinyuz
+#  转发脚本 Script v1.7.1 By Shinyuz
 #  快捷键: zf
 #  更新内容: 极致精简排版 + 智能源静默切换
 # ====================================================
@@ -19,6 +19,10 @@ REALM_CONFIG="/etc/realm/config.toml"
 REALM_SERVICE="/etc/systemd/system/realm.service"
 REMARK_FILE="/etc/realm/remarks.txt" 
 SCRIPT_PATH=$(readlink -f "$0")
+TRAFFIC_DIR="/etc/realm"
+TG_CONF="$TRAFFIC_DIR/tg_notify.conf"
+MONITOR_SERVICE="/etc/systemd/system/forwarding-traffic.service"
+MONITOR_TIMER="/etc/systemd/system/forwarding-traffic.timer"
 
 check_root() {
     if [ "$EUID" -ne 0 ]; then
@@ -65,17 +69,10 @@ check_status() {
 }
 
 update_script() {
+    echo -e "\n${YELLOW}正在检查更新...${PLAIN}"
+    echo -e "${GREEN}当前版本 v1.7.1${PLAIN}"
     echo ""
-    echo -e "${GREEN}正在更新脚本...${PLAIN}"
-    echo ""
-    
-    # 下载 -> 成功后直接打印(无空行) -> 延时 -> 替换进程
-    wget -N --no-check-certificate "https://raw.githubusercontent.com/Shinyuz/net-forwarder/main/forwarding.sh" && chmod +x forwarding.sh && \
-    echo -e "${GREEN}更新成功！正在重启脚本...${PLAIN}" && \
-    sleep 1 && \
-    exec ./forwarding.sh
-    
-    exit 0
+    read -p "按回车键继续..."
 }
 
 init_remark_file() {
@@ -604,6 +601,597 @@ EOF
     done
 }
 
+send_tg_msg() {
+    if [[ -f "$TG_CONF" ]]; then
+        source "$TG_CONF"
+        if [[ -n "$TG_BOT_TOKEN" && -n "$TG_CHAT_ID" ]]; then
+            curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" -d chat_id="${TG_CHAT_ID}" -d text="$1" >/dev/null 2>&1
+        fi
+    fi
+}
+
+ensure_block_chain() {
+    if ! nft list table inet realm_block >/dev/null 2>&1; then
+        nft add table inet realm_block
+        nft add chain inet realm_block input { type filter hook input priority -300 \; }
+    fi
+}
+
+init_nftables() {
+    # 1. 建立基础表和链（如果不存在）
+    if ! nft list table inet realm_stats >/dev/null 2>&1; then
+        nft add table inet realm_stats
+        nft add chain inet realm_stats input_counter { type filter hook input priority 0 \; }
+        nft add chain inet realm_stats output_counter { type filter hook output priority 0 \; }
+    fi
+
+    # 2. 自动扫描当前配置文件中的所有端口并添加监控规则
+    get_realm_rules
+    if [ ${#r_lport[@]} -gt 0 ]; then
+        for port in "${r_lport[@]}"; do
+            if [[ "$port" =~ ^[0-9]+$ ]]; then
+                if ! nft list chain inet realm_stats input_counter | grep "tcp dport $port" >/dev/null 2>&1; then
+                    nft add rule inet realm_stats input_counter tcp dport $port counter
+                fi
+                if ! nft list chain inet realm_stats output_counter | grep "tcp sport $port" >/dev/null 2>&1; then
+                    nft add rule inet realm_stats output_counter tcp sport $port counter
+                fi
+                if ! nft list chain inet realm_stats input_counter | grep "udp dport $port" >/dev/null 2>&1; then
+                    nft add rule inet realm_stats input_counter udp dport $port counter
+                fi
+                if ! nft list chain inet realm_stats output_counter | grep "udp sport $port" >/dev/null 2>&1; then
+                    nft add rule inet realm_stats output_counter udp sport $port counter
+                fi
+            fi
+        done
+    fi
+}
+
+get_port_traffic() {
+    local port=$1
+    if ! nft list chain inet realm_stats input_counter | grep "tcp dport $port" >/dev/null 2>&1; then
+        nft add rule inet realm_stats input_counter tcp dport $port counter
+    fi
+    if ! nft list chain inet realm_stats output_counter | grep "tcp sport $port" >/dev/null 2>&1; then
+        nft add rule inet realm_stats output_counter tcp sport $port counter
+    fi
+    if ! nft list chain inet realm_stats input_counter | grep "udp dport $port" >/dev/null 2>&1; then
+        nft add rule inet realm_stats input_counter udp dport $port counter
+    fi
+    if ! nft list chain inet realm_stats output_counter | grep "udp sport $port" >/dev/null 2>&1; then
+        nft add rule inet realm_stats output_counter udp sport $port counter
+    fi
+    rx_tcp=$(nft list chain inet realm_stats input_counter | grep "tcp dport $port" | awk '{for(i=1;i<=NF;i++) if($i=="bytes") print $(i+1)}')
+    tx_tcp=$(nft list chain inet realm_stats output_counter | grep "tcp sport $port" | awk '{for(i=1;i<=NF;i++) if($i=="bytes") print $(i+1)}')
+    rx_udp=$(nft list chain inet realm_stats input_counter | grep "udp dport $port" | awk '{for(i=1;i<=NF;i++) if($i=="bytes") print $(i+1)}')
+    tx_udp=$(nft list chain inet realm_stats output_counter | grep "udp sport $port" | awk '{for(i=1;i<=NF;i++) if($i=="bytes") print $(i+1)}')
+    rx=$(( ${rx_tcp:-0} + ${rx_udp:-0} ))
+    tx=$(( ${tx_tcp:-0} + ${tx_udp:-0} ))
+    echo "${rx:-0} ${tx:-0}"
+}
+
+format_bytes() {
+    local b=$1
+    if [[ $b -lt 1024 ]]; then
+        echo "${b} B"
+    elif [[ $b -lt 1048576 ]]; then
+        echo "$((b/1024)) KB"
+    elif [[ $b -lt 1073741824 ]]; then
+        echo "$((b/1048576)) MB"
+    else
+        echo "$((b/1073741824)) GB"
+    fi
+}
+
+get_visual_length() {
+    local s=$1
+    local c=$(echo -e "$s" | sed "s/\x1B\[[0-9;]*[a-zA-Z]//g")
+    echo $(( ${#c} + ( $(echo -n "$c" | wc -c) - ${#c} ) / 2 ))
+}
+
+get_padding() {
+    local length=$1
+    if [[ -z "$length" || ! "$length" =~ ^[0-9]+$ ]]; then length=1; fi
+    if [[ "$length" -lt 1 ]]; then length=1; fi
+    printf "%${length}s" ""
+}
+
+center_line() {
+    local s=$1
+    local cols
+    cols=$(tput cols 2>/dev/null)
+    if [[ -z "$cols" || ! "$cols" =~ ^[0-9]+$ ]]; then
+        cols=100
+    fi
+    local len=$(get_visual_length "$s")
+    local pad=$(( (cols - len) / 2 ))
+    if [[ "$pad" -lt 0 ]]; then pad=0; fi
+    printf "%*s%b\n" "$pad" "" "$s"
+}
+
+center_line_width() {
+    local s=$1
+    local width_str=$2
+    local width=$(get_visual_length "$width_str")
+    local len=$(get_visual_length "$s")
+    local pad=$(( (width - len) / 2 ))
+    if [[ "$pad" -lt 0 ]]; then pad=0; fi
+    printf "%*s%b\n" "$pad" "" "$s"
+}
+
+get_port_name() {
+    local port=$1
+    local remark=$(get_realm_remark "$port")
+    if [[ -z "$remark" || "$remark" == "无" ]]; then
+        echo "端口-$port"
+    else
+        echo "$remark-$port"
+    fi
+}
+
+ensure_monitor_timer() {
+    cat > "$MONITOR_SERVICE" <<EOF
+[Unit]
+Description=Forwarding Traffic Monitor
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash $SCRIPT_PATH monitor
+EOF
+
+    cat > "$MONITOR_TIMER" <<EOF
+[Unit]
+Description=Forwarding Traffic Monitor Timer
+
+[Timer]
+OnBootSec=10s
+OnUnitActiveSec=10s
+AccuracySec=1s
+Unit=forwarding-traffic.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable --now forwarding-traffic.timer >/dev/null 2>&1
+}
+
+show_traffic() {
+    mkdir -p "$TRAFFIC_DIR"
+    init_nftables
+    local header_str="------------ 端口流量监控与限制 (Traffic Monitor) ------------"
+    local sep_line="-------------------------------------------------------------------------------------------------------------"
+    center_line_width "${YELLOW}${header_str}${PLAIN}" "$sep_line"
+    echo -e "$sep_line"
+    get_realm_rules
+    if [ ${#r_lport[@]} -eq 0 ]; then
+        echo -e "${YELLOW}暂无规则${PLAIN}"
+    else
+        for ((i=0; i<${#r_lport[@]}; i++)); do
+            port="${r_lport[$i]}"
+            name=$(get_port_name "$port")
+            read rx tx <<< $(get_port_traffic "$port")
+            total=$((rx + tx))
+            rx_f=$(format_bytes $rx)
+            tx_f=$(format_bytes $tx)
+            total_f=$(format_bytes $total)
+            status_text=""
+            is_stopped=false
+            if [[ -f "$TRAFFIC_DIR/limit_${port}.conf" ]]; then
+                limit=$(cat "$TRAFFIC_DIR/limit_${port}.conf")
+                l_bytes=$((limit * 1024 * 1024 * 1024))
+                if [[ $total -ge $l_bytes ]]; then
+                    status_text="${RED}已停用${PLAIN}"
+                    is_stopped=true
+                else
+                    status_text="${YELLOW}限${limit}G${PLAIN}"
+                fi
+            fi
+            if [[ -f "$TRAFFIC_DIR/limit_rate_${port}.conf" && "$is_stopped" == "false" ]]; then
+                rate=$(cat "$TRAFFIC_DIR/limit_rate_${port}.conf")
+                if [[ -n "$status_text" ]]; then
+                    status_text="${status_text} ${YELLOW}限速${rate}M${PLAIN}"
+                else
+                    status_text="${YELLOW}限速${rate}M${PLAIN}"
+                fi
+            fi
+            if [[ -z "$status_text" ]]; then status_text="${PLAIN}正常${PLAIN}"; fi
+            v_len=$(get_visual_length "$name")
+            pad_len=$((30 - v_len - 7))
+            padding=$(get_padding "$pad_len")
+            
+            printf "${GREEN}%d.${PLAIN}    %s%s ${PLAIN}出↑${PLAIN} %-12s    ${PLAIN}入↓${PLAIN} %-12s    ${PLAIN}总:${PLAIN} %-12s    %b\n" \
+            "$((i+1))" "$name" "$padding" "$tx_f" "$rx_f" "$total_f" "$status_text"
+            
+            if [[ $i -lt $(( ${#r_lport[@]} - 1 )) ]]; then echo -e ""; fi
+        done
+    fi
+    echo -e "$sep_line"
+    echo -e ""
+    echo -e " ${GREEN}1.${PLAIN} 刷新统计"
+    echo -e ""
+    echo -e " ${GREEN}2.${PLAIN} 设置流量限制"
+    echo -e ""
+    echo -e " ${GREEN}3.${PLAIN} 设置端口限速"
+    echo -e ""
+    echo -e " ${GREEN}4.${PLAIN} 端口管理"
+    echo -e ""
+    echo -e " ${GREEN}5.${PLAIN} 重置流量统计数据"
+    echo -e ""
+    echo -e " ${GREEN}6.${PLAIN} 设置 Telegram 通知"
+    echo -e ""
+    echo -e " ${GREEN}0.${PLAIN} 返回上一页"
+    echo -e ""
+    read -p "选项[0-6]: " c
+    if [[ "$c" != "0" ]]; then
+        echo -e ""
+    fi
+    case "$c" in
+        1) show_traffic ;;
+        2) set_traffic_quota ;;
+        3) set_port_limit ;;
+        4) port_manager_menu ;;
+        5) reset_traffic_menu ;;
+        6) setup_tg_notify ;;
+        0) return ;;
+        *) show_traffic ;;
+    esac
+}
+
+port_manager_menu() {
+    echo -e "${YELLOW}------------ 端口管理 ------------${PLAIN}"
+    echo -e ""
+    get_realm_rules
+    if [ ${#r_lport[@]} -eq 0 ]; then
+        echo -e "${YELLOW}暂无规则${PLAIN}"
+        echo -e ""
+        read -n 1 -s -r -p "按任意键返回..."
+        echo -e ""
+        echo -e ""
+        show_traffic
+        return
+    fi
+    for ((i=0; i<${#r_lport[@]}; i++)); do
+        name=$(get_port_name "${r_lport[$i]}")
+        echo -e " ${GREEN}$((i+1)).${PLAIN} ${name}"
+        echo -e ""
+    done
+    echo -e " ${GREEN}0.${PLAIN} 返回"
+    echo -e ""
+    read -p "选择[0-${#r_lport[@]}]: " idx
+    echo -e ""
+    if [[ "$idx" == "0" ]]; then show_traffic; return; fi
+    if [[ ! "$idx" =~ ^[0-9]+$ ]] || [[ "$idx" -lt 1 ]] || [[ "$idx" -gt "${#r_lport[@]}" ]]; then
+        port_manager_menu
+        return
+    fi
+    real=$((idx-1))
+    port_action_menu "${r_lport[$real]}"
+}
+
+port_action_menu() {
+    local port=$1
+    local status="${GREEN}running${PLAIN}"
+    ensure_block_chain
+    if nft list chain inet realm_block input | grep -q "dport $port drop"; then
+        status="${RED}stopped${PLAIN}"
+    fi
+    echo -e "${YELLOW}------------ 端口管理 ------------${PLAIN}"
+    echo -e ""
+    echo -e " 端口: ${port}  状态: ${status}"
+    echo -e ""
+    echo -e " ${GREEN}1.${PLAIN} 打开端口"
+    echo -e ""
+    echo -e " ${GREEN}2.${PLAIN} 关闭端口"
+    echo -e ""
+    echo -e " ${GREEN}0.${PLAIN} 返回"
+    echo -e ""
+    read -p "请选择[0-2]: " opt
+    echo -e ""
+    case "$opt" in
+        1)
+            while nft -a list chain inet realm_block input | grep -q "tcp dport $port drop"; do
+                nft delete rule inet realm_block input handle $(nft -a list chain inet realm_block input | grep "tcp dport $port drop" | head -n 1 | awk '{print $NF}') 2>/dev/null
+            done
+            while nft -a list chain inet realm_block input | grep -q "udp dport $port drop"; do
+                nft delete rule inet realm_block input handle $(nft -a list chain inet realm_block input | grep "udp dport $port drop" | head -n 1 | awk '{print $NF}') 2>/dev/null
+            done
+            echo -e "${GREEN}端口已开启！${PLAIN}"
+            echo -e ""
+            read -n 1 -s -r -p "按任意键返回..."
+            echo -e ""
+            echo -e ""
+            port_action_menu "$port"
+            ;;
+        2)
+            if ! nft list chain inet realm_block input | grep -q "tcp dport $port drop"; then
+                nft add rule inet realm_block input tcp dport $port drop
+            fi
+            if ! nft list chain inet realm_block input | grep -q "udp dport $port drop"; then
+                nft add rule inet realm_block input udp dport $port drop
+            fi
+            echo -e "${GREEN}端口已关闭！${PLAIN}"
+            echo -e ""
+            read -n 1 -s -r -p "按任意键返回..."
+            echo -e ""
+            echo -e ""
+            port_action_menu "$port"
+            ;;
+        0) port_manager_menu ;;
+        *) port_action_menu "$port" ;;
+    esac
+}
+
+setup_tg_notify() {
+    mkdir -p "$TRAFFIC_DIR"
+    echo -e "${YELLOW}------------ 设置 Telegram 通知 ------------${PLAIN}"
+    echo -e ""
+    if [[ -f "$TG_CONF" ]]; then
+        source "$TG_CONF"
+        echo -e "当前 Token: ${GREEN}${TG_BOT_TOKEN:0:10}******${PLAIN}"
+        echo -e "当前 ChatID: ${GREEN}${TG_CHAT_ID}${PLAIN}"
+    else
+        echo -e "当前状态: ${YELLOW}未配置${PLAIN}"
+    fi
+    echo -e ""
+    echo -e " ${GREEN}1.${PLAIN} 配置/修改"
+    echo -e ""
+    echo -e " ${GREEN}2.${PLAIN} 测试消息"
+    echo -e ""
+    echo -e " ${GREEN}3.${PLAIN} 清除配置"
+    echo -e ""
+    echo -e " ${GREEN}0.${PLAIN} 返回"
+    echo -e ""
+    read -p "选项[0-3]: " o
+    echo -e ""
+    case "$o" in
+        1) 
+           read -p "Token: " t
+           read -p "ChatID: " c
+           echo "TG_BOT_TOKEN=\"$t\"" > "$TG_CONF"
+           echo "TG_CHAT_ID=\"$c\"" >> "$TG_CONF"
+           echo -e "${GREEN}保存成功${PLAIN}"
+           echo -e ""
+           read -n 1 -s -r -p "按键返回..."
+           echo -e ""
+           setup_tg_notify 
+           ;;
+        2) 
+           echo -e "${YELLOW}发送中...${PLAIN}"
+           send_tg_msg "转发脚本 通知测试"
+           echo -e "${GREEN}发送完成${PLAIN}"
+           echo -e ""
+           read -n 1 -s -r -p "按键返回..."
+           echo -e ""
+           setup_tg_notify 
+           ;;
+        3) 
+           rm -f "$TG_CONF"
+           echo -e "${GREEN}已清除${PLAIN}"
+           echo -e ""
+           read -n 1 -s -r -p "按键返回..."
+           echo -e ""
+           setup_tg_notify 
+           ;;
+        0) show_traffic ;;
+        *) setup_tg_notify ;;
+    esac
+}
+
+set_traffic_quota() {
+    mkdir -p "$TRAFFIC_DIR"
+    echo -e "${YELLOW}------------ 设置流量限制 ------------${PLAIN}"
+    get_realm_rules
+    echo -e ""
+    for ((i=0; i<${#r_lport[@]}; i++)); do
+        name=$(get_port_name "${r_lport[$i]}")
+        echo -e " ${GREEN}$((i+1)).${PLAIN} ${name}"
+        echo -e ""
+    done
+    echo -e " ${GREEN}0.${PLAIN} 返回"
+    echo -e ""
+    read -p "选择[0-${#r_lport[@]}]: " idx
+    echo -e ""
+    if [[ "$idx" == "0" ]]; then show_traffic; return; fi
+    real=$((idx-1))
+    port="${r_lport[$real]}"
+    read -p "流量配额(GB, 0取消): " gb
+    echo -e ""
+    if [[ "$gb" == "0" ]]; then
+        rm -f "$TRAFFIC_DIR/limit_${port}.conf"
+        ensure_block_chain
+        while nft -a list chain inet realm_block input | grep -q "tcp dport $port drop"; do
+            nft delete rule inet realm_block input handle $(nft -a list chain inet realm_block input | grep "tcp dport $port drop" | head -n 1 | awk '{print $NF}') 2>/dev/null
+        done
+        while nft -a list chain inet realm_block input | grep -q "udp dport $port drop"; do
+            nft delete rule inet realm_block input handle $(nft -a list chain inet realm_block input | grep "udp dport $port drop" | head -n 1 | awk '{print $NF}') 2>/dev/null
+        done
+        echo -e "${YELLOW}已取消限制${PLAIN}"
+    else
+        echo "$gb" > "$TRAFFIC_DIR/limit_${port}.conf"
+        ensure_block_chain
+        ensure_monitor_timer
+        
+        read rx tx <<< $(get_port_traffic "$port")
+        total=$((rx + tx))
+        limit_bytes=$((gb * 1024 * 1024 * 1024))
+        if [[ $total -ge $limit_bytes ]]; then
+            if ! nft list chain inet realm_block input | grep -q "tcp dport $port drop"; then
+                nft add rule inet realm_block input tcp dport $port drop
+            fi
+            if ! nft list chain inet realm_block input | grep -q "udp dport $port drop"; then
+                nft add rule inet realm_block input udp dport $port drop
+            fi
+        else
+            while nft -a list chain inet realm_block input | grep -q "tcp dport $port drop"; do
+                nft delete rule inet realm_block input handle $(nft -a list chain inet realm_block input | grep "tcp dport $port drop" | head -n 1 | awk '{print $NF}') 2>/dev/null
+            done
+            while nft -a list chain inet realm_block input | grep -q "udp dport $port drop"; do
+                nft delete rule inet realm_block input handle $(nft -a list chain inet realm_block input | grep "udp dport $port drop" | head -n 1 | awk '{print $NF}') 2>/dev/null
+            done
+        fi
+        
+        echo -e "${GREEN}设置完成 (已启动后台自动监控)${PLAIN}"
+    fi
+    echo -e ""
+    read -n 1 -s -r -p "按键返回..."
+    echo -e ""
+    echo -e ""
+    show_traffic
+}
+
+set_port_limit() {
+    mkdir -p "$TRAFFIC_DIR"
+    echo -e "${YELLOW}------------ 设置端口限速 ------------${PLAIN}"
+    get_realm_rules
+    echo -e ""
+    for ((i=0; i<${#r_lport[@]}; i++)); do
+        name=$(get_port_name "${r_lport[$i]}")
+        echo -e " ${GREEN}$((i+1)).${PLAIN} ${name}"
+        echo -e ""
+    done
+    echo -e " ${GREEN}0.${PLAIN} 返回"
+    echo -e ""
+    read -p "选择[0-${#r_lport[@]}]: " idx
+    echo -e ""
+    if [[ "$idx" == "0" ]]; then show_traffic; return; fi
+    real=$((idx-1))
+    port="${r_lport[$real]}"
+    dev=$(ip route|grep default|head -n1|awk '{print $5}')
+    read -p "限速(Mbps, 0取消): " limit
+    echo -e ""
+    tc filter del dev $dev parent 1:0 protocol ip prio 1 u32 match ip sport $port 0xffff >/dev/null 2>&1
+    tc class del dev $dev parent 1:1 classid 1:$(printf "%x" $port) >/dev/null 2>&1
+    if [[ "$limit" == "0" ]]; then
+        rm -f "$TRAFFIC_DIR/limit_rate_${port}.conf"
+        echo -e "${YELLOW}已取消限速${PLAIN}"
+    else
+        if ! tc qdisc show dev $dev | grep -q "htb 1:"; then
+             tc qdisc add dev $dev root handle 1: htb default 10
+             tc class add dev $dev parent 1: classid 1:1 htb rate 1000mbit
+        fi
+        k=$((limit*1000))
+        class_id="1:$(printf "%x" $port)"
+        tc class add dev $dev parent 1:1 classid $class_id htb rate ${k}kbit ceil ${k}kbit
+        tc filter add dev $dev protocol ip parent 1:0 prio 1 u32 match ip sport $port 0xffff flowid $class_id
+        echo "$limit" > "$TRAFFIC_DIR/limit_rate_${port}.conf"
+        echo -e "${GREEN}设置完成${PLAIN}"
+    fi
+    echo -e ""
+    read -n 1 -s -r -p "按键返回..."
+    echo -e ""
+    echo -e ""
+    show_traffic
+}
+
+reset_traffic_menu() {
+    mkdir -p "$TRAFFIC_DIR"
+    local header_str="------------ 重置流量统计 ------------"
+    local header_len=$(get_visual_length "$header_str")
+    echo -e "${YELLOW}${header_str}${PLAIN}"
+    get_realm_rules
+    echo -e ""
+    for ((i=0; i<${#r_lport[@]}; i++)); do
+        name=$(get_port_name "${r_lport[$i]}")
+        port="${r_lport[$i]}"
+        cron=$(crontab -l 2>/dev/null | grep "# reset_${port}")
+        if [[ -n "$cron" ]]; then
+            st_text="每月$(echo $cron|awk '{print $3}')号重置"
+            st_color="${YELLOW}${st_text}${PLAIN}"
+        else
+            st_text="未设置自动"
+            st_color="${PLAIN}${st_text}${PLAIN}"
+        fi
+        prefix_plain=" $((i+1)). ${name}"
+        prefix_color=" ${GREEN}$((i+1)).${PLAIN} ${name}"
+        status_plain="(${st_text})"
+        status_color="(${st_color})"
+        prefix_len=$(get_visual_length "$prefix_plain")
+        status_len=$(get_visual_length "$status_plain")
+        pad_len=$((header_len - prefix_len - status_len))
+        if [[ $pad_len -lt 1 ]]; then pad_len=1; fi
+        padding=$(get_padding "$pad_len")
+        printf "%b%s%b\n" "$prefix_color" "$padding" "$status_color"
+        echo -e ""
+    done
+    echo -e " ${GREEN}$(( ${#r_lport[@]} + 1 )).${PLAIN} 重置所有"
+    echo -e ""
+    echo -e " ${GREEN}0.${PLAIN} 返回"
+    echo -e ""
+    read -p "请选择[0-$(( ${#r_lport[@]} + 1 ))]: " idx 
+    echo -e ""
+    if [[ "$idx" == "0" ]]; then show_traffic; return; fi
+    if [[ "$idx" == "$(( ${#r_lport[@]} + 1 ))" ]]; then
+        nft flush chain inet realm_stats input_counter
+        nft flush chain inet realm_stats output_counter
+        ensure_block_chain
+        for port in "${r_lport[@]}"; do
+            while nft -a list chain inet realm_block input | grep -q "tcp dport $port drop"; do
+                nft delete rule inet realm_block input handle $(nft -a list chain inet realm_block input | grep "tcp dport $port drop" | head -n 1 | awk '{print $NF}') 2>/dev/null
+            done
+            while nft -a list chain inet realm_block input | grep -q "udp dport $port drop"; do
+                nft delete rule inet realm_block input handle $(nft -a list chain inet realm_block input | grep "udp dport $port drop" | head -n 1 | awk '{print $NF}') 2>/dev/null
+            done
+        done
+        echo -e "${GREEN}已重置所有${PLAIN}"
+        echo -e "" 
+        read -n 1 -s -r -p "按键返回..."
+        echo -e ""
+        echo -e ""
+        reset_traffic_menu
+        return
+    fi
+    real=$((idx-1))
+    port="${r_lport[$real]}"
+    name=$(get_port_name "$port")
+    echo -e " ${GREEN}1.${PLAIN} 立即清零"
+    echo -e ""
+    echo -e " ${GREEN}2.${PLAIN} 设置自动重置日"
+    echo -e ""
+    echo -e " ${GREEN}0.${PLAIN} 返回"
+    echo -e ""
+    read -p "请选择[0-2]: " op 
+    echo -e ""
+    if [[ "$op" == "0" ]]; then reset_traffic_menu; return; fi
+    if [[ "$op" == "1" ]]; then
+        ensure_block_chain
+        while nft -a list chain inet realm_block input | grep -q "tcp dport $port drop"; do
+            nft delete rule inet realm_block input handle $(nft -a list chain inet realm_block input | grep "tcp dport $port drop" | head -n 1 | awk '{print $NF}') 2>/dev/null
+        done
+        while nft -a list chain inet realm_block input | grep -q "udp dport $port drop"; do
+            nft delete rule inet realm_block input handle $(nft -a list chain inet realm_block input | grep "udp dport $port drop" | head -n 1 | awk '{print $NF}') 2>/dev/null
+        done
+        nft delete rule inet realm_stats input_counter handle $(nft -a list chain inet realm_stats input_counter | grep "tcp dport $port" | awk '{print $NF}') 2>/dev/null
+        nft delete rule inet realm_stats output_counter handle $(nft -a list chain inet realm_stats output_counter | grep "tcp sport $port" | awk '{print $NF}') 2>/dev/null
+        nft delete rule inet realm_stats input_counter handle $(nft -a list chain inet realm_stats input_counter | grep "udp dport $port" | awk '{print $NF}') 2>/dev/null
+        nft delete rule inet realm_stats output_counter handle $(nft -a list chain inet realm_stats output_counter | grep "udp sport $port" | awk '{print $NF}') 2>/dev/null
+        nft add rule inet realm_stats input_counter tcp dport $port counter
+        nft add rule inet realm_stats output_counter tcp sport $port counter
+        nft add rule inet realm_stats input_counter udp dport $port counter
+        nft add rule inet realm_stats output_counter udp sport $port counter
+        echo -e "${GREEN}已清零${PLAIN}"
+        echo -e "" 
+        read -n 1 -s -r -p "按键返回..."
+        echo -e ""
+        echo -e ""
+        reset_traffic_menu
+    elif [[ "$op" == "2" ]]; then
+        read -p "每月几号(1-31, 0关闭): " d
+        echo -e ""
+        (crontab -l 2>/dev/null | grep -v "# reset_${port}") | crontab -
+        if [[ "$d" != "0" ]]; then
+            (crontab -l 2>/dev/null; echo "0 0 $d * * /bin/bash $SCRIPT_PATH reset_port_exec $port \"$name\" >/dev/null 2>&1 # reset_${port}") | crontab -
+        fi
+        echo -e "${GREEN}设置成功${PLAIN}"
+        echo -e "" 
+        read -n 1 -s -r -p "按键返回..."
+        echo -e ""
+        echo -e ""
+        reset_traffic_menu
+    fi
+}
+
 uninstall_realm() {
     echo "" 
     read -p "确定要卸载 realm 吗？(y/n): " choice
@@ -847,7 +1435,9 @@ uninstall_all() {
     echo ""
     echo "2. 清空 iptables 转发规则"
     echo ""
-    echo "3. 删除本脚本及 'zf' 快捷键"
+    echo "3. 清理端口流量监控配置"
+    echo ""
+    echo "4. 删除本脚本及 'zf' 快捷键"
     echo ""
     read -p "确定要彻底卸载脚本及所有组件吗？(y/n): " choice
     echo ""
@@ -857,6 +1447,34 @@ uninstall_all() {
         systemctl disable realm >/dev/null 2>&1
         rm -f $REALM_SERVICE
         rm -f $REALM_PATH
+        
+        if [ -d "$TRAFFIC_DIR" ]; then
+            dev=$(ip route|grep default|head -n1|awk '{print $5}')
+            for file in "$TRAFFIC_DIR"/limit_rate_*.conf; do
+                if [[ -f "$file" && -n "$dev" ]]; then
+                    port=${file#*limit_rate_}
+                    port=${port%.conf}
+                    tc filter del dev $dev parent 1:0 protocol ip prio 1 u32 match ip sport $port 0xffff >/dev/null 2>&1
+                    tc class del dev $dev parent 1:1 classid 1:$(printf "%x" $port) >/dev/null 2>&1
+                fi
+            done
+            rm -f "$TRAFFIC_DIR"/limit_*.conf
+            rm -f "$TRAFFIC_DIR"/limit_rate_*.conf
+            rm -f "$TG_CONF"
+        fi
+        
+        nft delete table inet realm_stats >/dev/null 2>&1
+        nft delete table inet realm_block >/dev/null 2>&1
+        
+        if command -v crontab &> /dev/null; then
+            crontab -l 2>/dev/null | grep -v "$SCRIPT_PATH reset_port_exec" | crontab -
+        fi
+        
+        systemctl disable --now forwarding-traffic.timer >/dev/null 2>&1
+        rm -f "$MONITOR_SERVICE"
+        rm -f "$MONITOR_TIMER"
+        systemctl daemon-reload
+        
         rm -rf /etc/realm
         
         iptables -t nat -F
@@ -936,10 +1554,34 @@ manage_iptables_menu() {
     done
 }
 
+manage_script_menu() {
+    while true; do
+        echo -e "\n${GREEN}===================================================${PLAIN}"
+        echo ""
+        echo -e "${YELLOW} ---- 脚本管理 ----${PLAIN}"
+        echo ""
+        echo " 1. 更新脚本"
+        echo ""
+        echo " 2. 卸载脚本"
+        echo ""
+        echo " 0. 返回"
+        echo ""
+        
+        read -p "请输入选项 [0-2]: " sub_num
+
+        case "$sub_num" in
+            1) update_script ;;
+            2) uninstall_all ;;
+            0) return ;;
+            *) echo -e "\n${RED}请输入正确的数字！${PLAIN}\n"; read -p "按回车键继续..." ;;
+        esac
+    done
+}
+
 show_menu() {
     check_status
     echo ""
-    echo -e "${GREEN}========= 转发脚本 Script v1.7 By Shinyuz =========${PLAIN}"
+    echo -e "${GREEN}========= 转发脚本 Script v1.7.1 By Shinyuz =========${PLAIN}"
     echo ""
     echo -e " realm: ${realm_status}"
     echo ""
@@ -970,9 +1612,9 @@ show_menu() {
     
     echo "------------------------------"
     echo ""
-    echo " 8. 更新脚本"
+    echo " 8. 端口流量使用情况"
     echo ""
-    echo " 9. 卸载脚本"
+    echo " 9. 脚本管理"
     echo ""
     echo " 0. 退出脚本"
     echo ""
@@ -987,12 +1629,66 @@ show_menu() {
         5) add_iptables_rule; echo ""; read -p "按回车键继续..." ;;
         6) manage_iptables_menu ;;
         7) install_iptables_env ;; 
-        8) update_script ;;
-        9) uninstall_all ;;
+        8) echo ""; show_traffic ;;
+        9) manage_script_menu ;;
         0) echo ""; exit 0 ;; 
         *) echo -e "\n${RED}请输入正确的数字！${PLAIN}\n"; read -p "按回车键继续..." ;;
     esac
 }
+
+if [[ "$1" == "reset_port_exec" ]]; then
+    ensure_block_chain
+    nft delete rule inet realm_block input handle $(nft -a list chain inet realm_block input | grep "tcp dport $2 drop" | awk '{print $NF}') 2>/dev/null
+    nft delete rule inet realm_block input handle $(nft -a list chain inet realm_block input | grep "udp dport $2 drop" | awk '{print $NF}') 2>/dev/null
+    nft delete rule inet realm_stats input_counter handle $(nft -a list chain inet realm_stats input_counter | grep "tcp dport $2" | awk '{print $NF}') 2>/dev/null
+    nft delete rule inet realm_stats output_counter handle $(nft -a list chain inet realm_stats output_counter | grep "tcp sport $2" | awk '{print $NF}') 2>/dev/null
+    nft delete rule inet realm_stats input_counter handle $(nft -a list chain inet realm_stats input_counter | grep "udp dport $2" | awk '{print $NF}') 2>/dev/null
+    nft delete rule inet realm_stats output_counter handle $(nft -a list chain inet realm_stats output_counter | grep "udp sport $2" | awk '{print $NF}') 2>/dev/null
+    nft add rule inet realm_stats input_counter tcp dport $2 counter
+    nft add rule inet realm_stats output_counter tcp sport $2 counter
+    nft add rule inet realm_stats input_counter udp dport $2 counter
+    nft add rule inet realm_stats output_counter udp sport $2 counter
+    name="$3"
+    if [[ -z "$name" ]]; then
+        name=$(get_port_name "$2")
+    fi
+    send_tg_msg "🔔 [流量重置] 端口 ${name} ($2) 已自动重置"
+    exit 0
+fi
+
+if [[ "$1" == "monitor" ]]; then
+    init_nftables
+    ensure_block_chain
+    for file in "$TRAFFIC_DIR"/limit_*.conf; do
+        if [[ -f "$file" ]]; then
+            port=${file#*limit_}
+            port=${port%.conf}
+            limit_gb=$(cat "$file")
+            read rx tx <<< $(get_port_traffic "$port")
+            total=$((rx + tx))
+            limit_bytes=$((limit_gb * 1024 * 1024 * 1024))
+        if [[ $total -ge $limit_bytes ]]; then
+            is_blocked=$(nft list chain inet realm_block input | grep -E "tcp dport $port drop|udp dport $port drop")
+            if [[ -z "$is_blocked" ]]; then
+                nft add rule inet realm_block input tcp dport $port drop
+                nft add rule inet realm_block input udp dport $port drop
+                name=$(get_port_name "$port")
+                used_h=$(format_bytes $total)
+                msg="🚨 [流量耗尽] 端口 ${name} (${port}) 已自动停止 (已用 ${used_h} / 限额 ${limit_gb}GB)"
+                send_tg_msg "$msg"
+            fi
+        else
+            while nft -a list chain inet realm_block input | grep -q "tcp dport $port drop"; do
+                nft delete rule inet realm_block input handle $(nft -a list chain inet realm_block input | grep "tcp dport $port drop" | head -n 1 | awk '{print $NF}') 2>/dev/null
+            done
+            while nft -a list chain inet realm_block input | grep -q "udp dport $port drop"; do
+                nft delete rule inet realm_block input handle $(nft -a list chain inet realm_block input | grep "udp dport $port drop" | head -n 1 | awk '{print $NF}') 2>/dev/null
+            done
+        fi
+        fi
+    done
+    exit 0
+fi
 
 check_root
 set_shortcut
