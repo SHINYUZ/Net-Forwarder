@@ -70,9 +70,9 @@ check_status() {
 
 update_script() {
     echo -e "\n${YELLOW}正在检查更新...${PLAIN}"
-    echo -e "${GREEN}当前版本 v1.7.1${PLAIN}"
     echo ""
-    read -p "按回车键继续..."
+    wget -N --no-check-certificate "https://raw.githubusercontent.com/Shinyuz/net-forwarder/main/forwarding.sh" && chmod +x forwarding.sh && ./forwarding.sh
+    exit 0
 }
 
 init_remark_file() {
