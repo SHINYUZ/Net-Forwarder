@@ -310,6 +310,7 @@ add_realm_rule() {
     fi
     
     systemctl restart realm
+    init_nftables
     
     echo -e "${GREEN}规则已添加 ($msg_proto) 并重启服务！${PLAIN}"
 }
@@ -452,6 +453,7 @@ delete_realm_rule() {
         
         rebuild_realm_config
         systemctl restart realm
+        init_nftables
         
         echo -e "${GREEN}规则已删除！${PLAIN}\n"
         read -p "按回车键继续..."
