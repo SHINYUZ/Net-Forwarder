@@ -1752,6 +1752,7 @@ if [ ! -f "$REALM_PATH" ]; then
     install_iptables_env
 fi
 
+init_nftables
 while true; do
     show_menu
 done
