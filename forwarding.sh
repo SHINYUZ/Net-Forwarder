@@ -232,8 +232,8 @@ EOF
     cat > $REALM_SERVICE <<EOF
 [Unit]
 Description=realm Forwarding Service
-After=network-online.target
-Wants=network-online.target systemd-networkd-wait-online.service
+After=network.target network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
