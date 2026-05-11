@@ -1417,7 +1417,7 @@ reset_realm_rules() {
         rebuild_realm_config
         : > "$REMARK_FILE"
         systemctl restart realm
-        echo -e "\n${GREEN}realm 规则已清空 (保留全局优化配置)！${PLAIN}"
+        echo -e "\n${GREEN}realm 规则已清空${PLAIN}"
         echo "" 
         read -p "按回车键继续..."
     fi
