@@ -10,6 +10,7 @@
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
+WHITE='\033[0;37m'
 PLAIN='\033[0m'
 BLUE='\033[0;36m' 
 
@@ -929,9 +930,9 @@ render_traffic_row() {
         || nft_has_rule realm_block input tcp dport "$port" drop \
         || nft_has_rule realm_block input udp dport "$port" drop; then
         if [[ "$is_stopped" == "true" ]]; then
-            status_text="${RED}端口已关闭(已达限额)${PLAIN}"
+            status_text="${WHITE}端口已关闭(已达限额)${PLAIN}"
         else
-            status_text="${RED}端口已关闭${PLAIN}"
+            status_text="${WHITE}端口已关闭${PLAIN}"
         fi
     elif [[ -z "$status_text" ]]; then
         status_text="${PLAIN}正常${PLAIN}"
@@ -943,16 +944,22 @@ render_traffic_row() {
         "$((index+1))" "$name" "$padding" "$tx_f" "$rx_f" "$total_f" "$status_text"
 }
 
-# 光标保留在输入提示处，只重画流量数据行，不清屏也不重复输出菜单。
+# 只在内容变化时更新对应行；无变化时不向终端输出任何字符。
 refresh_traffic_rows() {
-    local count=$1 i up
-    printf '\033[s'
+    local count=$1 i up row changed=0
     for ((i=0; i<count; i++)); do
+        row=$(render_traffic_row "$i")
+        [[ "$row" == "${traffic_displayed_rows[$i]}" ]] && continue
+        if (( changed == 0 )); then
+            printf '\033[?25l\033[s'
+            changed=1
+        fi
         up=$((2 * count + 15 - 2 * i))
-        printf '\033[u\033[%dA\r\033[2K' "$up"
-        render_traffic_row "$i"
+        printf '\033[u\033[%dA\r\033[2K%s' "$up" "$row"
         printf '\033[u'
+        traffic_displayed_rows[$i]="$row"
     done
+    (( changed == 0 )) || printf '\033[?25h'
 }
 
 show_traffic() {
@@ -960,7 +967,8 @@ show_traffic() {
     init_nftables
     local header_str="------------ 端口流量监控与限制 (Traffic Monitor) ------------"
     local sep_line="-------------------------------------------------------------------------------------------------------------"
-    local count i c read_status pending=""
+    local count i c read_status row pending=""
+    local -a traffic_displayed_rows=()
     center_line_width "${YELLOW}${header_str}${PLAIN}" "$sep_line"
     echo -e "$sep_line"
     get_realm_rules
@@ -969,8 +977,9 @@ show_traffic() {
         echo -e "${YELLOW}暂无规则${PLAIN}"
     else
         for ((i=0; i<count; i++)); do
-            render_traffic_row "$i"
-            printf '\n'
+            row=$(render_traffic_row "$i")
+            traffic_displayed_rows[$i]="$row"
+            printf '%s\n' "$row"
             if (( i < count - 1 )); then printf '\n'; fi
         done
     fi
