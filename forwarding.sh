@@ -75,10 +75,31 @@ update_script() {
     local tmp_dir
     tmp_dir=$(mktemp -d /tmp/forwarding-update.XXXXXX)
     pushd "$tmp_dir" >/dev/null || { echo -e "${RED}无法进入临时目录${PLAIN}"; return; }
-    wget -N --no-check-certificate "https://raw.githubusercontent.com/Shinyuz/net-forwarder/main/forwarding.sh" && chmod +x forwarding.sh && ./forwarding.sh
+    local raw_url="https://raw.githubusercontent.com/Shinyuz/net-forwarder/main/forwarding.sh"
+    local update_url
+    local updated=0
+    for update_url in "$raw_url" "https://ghproxy.net/$raw_url" "https://gh-proxy.com/$raw_url"; do
+        rm -f forwarding.sh
+        if wget -q -T 15 -t 2 -O forwarding.sh "$update_url" \
+            && head -n 1 forwarding.sh | grep -qx '#!/bin/bash' \
+            && bash -n forwarding.sh; then
+            updated=1
+            break
+        fi
+        echo -e "${YELLOW}更新源不可用，尝试下一源...${PLAIN}"
+    done
+    if [ "$updated" -eq 1 ]; then
+        chmod +x forwarding.sh && ./forwarding.sh
+        local update_status=$?
+        popd >/dev/null
+        rm -rf "$tmp_dir"
+        exit "$update_status"
+    else
+        echo -e "${RED}所有更新源均失败。${PLAIN}"
+    fi
     popd >/dev/null
     rm -rf "$tmp_dir"
-    exit 0
+    return 1
 }
 
 init_remark_file() {
@@ -130,10 +151,10 @@ install_realm() {
 
     # 切到 /tmp，避免当前目录只读或权限不足 (修复)
     local work_dir
-    work_dir=$(mktemp -d /tmp/realm-install.XXXXXX)
-    pushd "$work_dir" >/dev/null || { echo -e "${RED}无法进入临时目录${PLAIN}"; return; }
+    work_dir=$(mktemp -d /tmp/realm-install.XXXXXX) || return 1
+    pushd "$work_dir" >/dev/null || { echo -e "${RED}无法进入临时目录${PLAIN}"; rm -rf "$work_dir"; return 1; }
     
-    # 1. 智能版本检测与策略选择
+    # 1. 获取版本；API 不可用时使用已知版本，下载顺序始终不变。
     echo -e "正在检测网络环境与最新版本..."
     echo ""  # [空行]
 
@@ -141,56 +162,38 @@ install_realm() {
     ONLINE_VER=$(wget -qO- -T 3 -t 1 "https://api.github.com/repos/zhboner/realm/releases/latest" | grep "tag_name" | head -n 1 | awk -F ":" '{print $2}' | sed 's/\"//g;s/,//g;s/ //g')
     
     if [[ -n "$ONLINE_VER" ]]; then
-        # 情况A: 成功获取 (IPv4/双栈)
         VERSION="$ONLINE_VER"
         echo -e "检测到最新版本: ${GREEN}${VERSION}${PLAIN}"
-        echo ""  # [空行]
-        echo -e "网络策略: ${GREEN}优先官方源${PLAIN}"
-        echo ""  # [空行]
-        USE_MIRROR_FIRST=false
     else
-        # 情况B: 获取失败 (IPv6 Only)
         VERSION="v2.9.1" # Realm 的保底版本
         echo -e "${YELLOW}无法连接 GitHub API，切换至保底版本: ${VERSION}${PLAIN}"
-        echo ""  # [空行]
-        echo -e "网络策略: ${YELLOW}优先镜像源 (IPv6优化)${PLAIN}"
-        echo ""  # [空行]
-        USE_MIRROR_FIRST=true
     fi
     
     FILENAME="realm-$REALM_ARCH.tar.gz"
     URL_OFFICIAL="https://github.com/zhboner/realm/releases/download/$VERSION/$FILENAME"
     URL_MIRROR="https://gh-proxy.com/https://github.com/zhboner/realm/releases/download/$VERSION/$FILENAME"
-    
+    URL_MIRROR_BACKUP="https://ghproxy.net/https://github.com/zhboner/realm/releases/download/$VERSION/$FILENAME"
+
     DOWNLOAD_SUCCESS=0
 
-    # 2. 执行下载 (根据策略)
-    if [[ "$USE_MIRROR_FIRST" == "true" ]]; then
-        # === 策略B: 优先镜像 ===
-        echo -e "正在下载..."
-        echo ""  # [空行]
-        wget -T 20 -t 2 -O realm.tar.gz "$URL_MIRROR"
-        if [ $? -eq 0 ]; then
+    # 2. 官方源先试；失败才依次尝试备用源。代理可能返回 HTML，须验证压缩包。
+    local source_name source_url
+    for source_name in official mirror backup; do
+        case "$source_name" in
+            official) source_url="$URL_OFFICIAL" ;;
+            mirror) source_url="$URL_MIRROR" ;;
+            backup) source_url="$URL_MIRROR_BACKUP" ;;
+        esac
+        echo "正在尝试 realm 下载源: $source_name"
+        rm -f realm.tar.gz
+        if wget -q -T 15 -t 2 -O realm.tar.gz "$source_url" \
+            && tar -tzf realm.tar.gz >/dev/null 2>&1 \
+            && tar -tzf realm.tar.gz 2>/dev/null | grep -Eq '(^|/)realm$'; then
             DOWNLOAD_SUCCESS=1
-        else
-            echo -e "${YELLOW}镜像源失败，尝试官方源...${PLAIN}"
-            wget -T 5 -t 1 -O realm.tar.gz "$URL_OFFICIAL"
-            if [ $? -eq 0 ]; then DOWNLOAD_SUCCESS=1; fi
+            break
         fi
-    else
-        # === 策略A: 优先官方 ===
-        echo -e "正在下载..."
-        echo ""  # [空行]
-        # 官方源允许静默尝试
-        wget -T 10 -t 1 -O realm.tar.gz "$URL_OFFICIAL" >/dev/null 2>&1
-        if [ $? -eq 0 ]; then
-            DOWNLOAD_SUCCESS=1
-        else
-            echo -e "${YELLOW}官方源超时，自动切换镜像源...${PLAIN}"
-            wget -T 15 -t 2 -O realm.tar.gz "$URL_MIRROR"
-            if [ $? -eq 0 ]; then DOWNLOAD_SUCCESS=1; fi
-        fi
-    fi
+        echo -e "${YELLOW}该下载源不可用或文件无效，尝试下一源...${PLAIN}"
+    done
 
     if [ $DOWNLOAD_SUCCESS -eq 0 ]; then
         echo "" 
@@ -198,7 +201,7 @@ install_realm() {
         rm -f realm.tar.gz
         popd >/dev/null
         rm -rf "$work_dir"
-        return
+        return 1
     fi
     
     # 3. 解压安装
@@ -210,11 +213,15 @@ install_realm() {
         rm -f realm.tar.gz
         popd >/dev/null
         rm -rf "$work_dir"
-        return
+        return 1
     fi
 
-    mv realm $REALM_PATH
-    chmod +x $REALM_PATH
+    if ! install -m 0755 realm "$REALM_PATH"; then
+        echo -e "${RED}realm 安装失败${PLAIN}"
+        popd >/dev/null
+        rm -rf "$work_dir"
+        return 1
+    fi
     rm -f realm.tar.gz
     popd >/dev/null
     rm -rf "$work_dir"
@@ -264,10 +271,14 @@ EOF
 
     systemctl daemon-reload
     echo ""
-    systemctl enable realm
+    if ! systemctl enable realm; then
+        echo -e "${RED}realm 服务启用失败。${PLAIN}"
+        return 1
+    fi
     echo ""
     echo -e "${GREEN}realm 安装完成！${PLAIN}"
     echo "" 
+    return 0
 }
 
 add_realm_rule() {
@@ -885,54 +896,82 @@ EOF
     systemctl enable --now "realm-reset-${port}.timer" >/dev/null 2>&1
 }
 
+render_traffic_row() {
+    local index=$1 port name rx tx total rx_f tx_f total_f
+    local status_text="" is_stopped=false limit l_bytes rate v_len pad_len padding
+    port="${r_lport[$index]}"
+    name=$(get_port_name "$port")
+    read -r rx tx <<< "$(get_port_traffic "$port")"
+    total=$((rx + tx))
+    rx_f=$(format_bytes "$rx")
+    tx_f=$(format_bytes "$tx")
+    total_f=$(format_bytes "$total")
+    if [[ -f "$TRAFFIC_DIR/limit_${port}.conf" ]]; then
+        limit=$(cat "$TRAFFIC_DIR/limit_${port}.conf")
+        l_bytes=$((limit * 1024 * 1024 * 1024))
+        if (( total >= l_bytes )); then
+            status_text="${RED}已停用${PLAIN}"
+            is_stopped=true
+        else
+            status_text="${YELLOW}限${limit}G${PLAIN}"
+        fi
+    fi
+    if [[ -f "$TRAFFIC_DIR/limit_rate_${port}.conf" && "$is_stopped" == "false" ]]; then
+        rate=$(cat "$TRAFFIC_DIR/limit_rate_${port}.conf")
+        if [[ -n "$status_text" ]]; then
+            status_text="${status_text} ${YELLOW}限速${rate}M${PLAIN}"
+        else
+            status_text="${YELLOW}限速${rate}M${PLAIN}"
+        fi
+    fi
+    # 与端口管理页使用相同的 nft 规则判断；标记文件尚未同步时也能显示关闭。
+    if is_manual_blocked "$port" \
+        || nft_has_rule realm_block input tcp dport "$port" drop \
+        || nft_has_rule realm_block input udp dport "$port" drop; then
+        if [[ "$is_stopped" == "true" ]]; then
+            status_text="${RED}端口已关闭(已达限额)${PLAIN}"
+        else
+            status_text="${RED}端口已关闭${PLAIN}"
+        fi
+    elif [[ -z "$status_text" ]]; then
+        status_text="${PLAIN}正常${PLAIN}"
+    fi
+    v_len=$(get_visual_length "$name")
+    pad_len=$((30 - v_len - 7))
+    padding=$(get_padding "$pad_len")
+    printf "${GREEN}%d.${PLAIN}    %s%s ${PLAIN}出↑${PLAIN} %-12s    ${PLAIN}入↓${PLAIN} %-12s    ${PLAIN}总:${PLAIN} %-12s    %b" \
+        "$((index+1))" "$name" "$padding" "$tx_f" "$rx_f" "$total_f" "$status_text"
+}
+
+# 光标保留在输入提示处，只重画流量数据行，不清屏也不重复输出菜单。
+refresh_traffic_rows() {
+    local count=$1 i up
+    printf '\033[s'
+    for ((i=0; i<count; i++)); do
+        up=$((2 * count + 15 - 2 * i))
+        printf '\033[u\033[%dA\r\033[2K' "$up"
+        render_traffic_row "$i"
+        printf '\033[u'
+    done
+}
+
 show_traffic() {
     mkdir -p "$TRAFFIC_DIR"
     init_nftables
     local header_str="------------ 端口流量监控与限制 (Traffic Monitor) ------------"
     local sep_line="-------------------------------------------------------------------------------------------------------------"
+    local count i c read_status pending=""
     center_line_width "${YELLOW}${header_str}${PLAIN}" "$sep_line"
     echo -e "$sep_line"
     get_realm_rules
-    if [ ${#r_lport[@]} -eq 0 ]; then
+    count=${#r_lport[@]}
+    if (( count == 0 )); then
         echo -e "${YELLOW}暂无规则${PLAIN}"
     else
-        for ((i=0; i<${#r_lport[@]}; i++)); do
-            port="${r_lport[$i]}"
-            name=$(get_port_name "$port")
-            read rx tx <<< $(get_port_traffic "$port")
-            total=$((rx + tx))
-            rx_f=$(format_bytes $rx)
-            tx_f=$(format_bytes $tx)
-            total_f=$(format_bytes $total)
-            status_text=""
-            is_stopped=false
-            if [[ -f "$TRAFFIC_DIR/limit_${port}.conf" ]]; then
-                limit=$(cat "$TRAFFIC_DIR/limit_${port}.conf")
-                l_bytes=$((limit * 1024 * 1024 * 1024))
-                if [[ $total -ge $l_bytes ]]; then
-                    status_text="${RED}已停用${PLAIN}"
-                    is_stopped=true
-                else
-                    status_text="${YELLOW}限${limit}G${PLAIN}"
-                fi
-            fi
-            if [[ -f "$TRAFFIC_DIR/limit_rate_${port}.conf" && "$is_stopped" == "false" ]]; then
-                rate=$(cat "$TRAFFIC_DIR/limit_rate_${port}.conf")
-                if [[ -n "$status_text" ]]; then
-                    status_text="${status_text} ${YELLOW}限速${rate}M${PLAIN}"
-                else
-                    status_text="${YELLOW}限速${rate}M${PLAIN}"
-                fi
-            fi
-            if [[ -z "$status_text" ]]; then status_text="${PLAIN}正常${PLAIN}"; fi
-            v_len=$(get_visual_length "$name")
-            pad_len=$((30 - v_len - 7))
-            padding=$(get_padding "$pad_len")
-            
-            printf "${GREEN}%d.${PLAIN}    %s%s ${PLAIN}出↑${PLAIN} %-12s    ${PLAIN}入↓${PLAIN} %-12s    ${PLAIN}总:${PLAIN} %-12s    %b\n" \
-            "$((i+1))" "$name" "$padding" "$tx_f" "$rx_f" "$total_f" "$status_text"
-            
-            if [[ $i -lt $(( ${#r_lport[@]} - 1 )) ]]; then echo -e ""; fi
+        for ((i=0; i<count; i++)); do
+            render_traffic_row "$i"
+            printf '\n'
+            if (( i < count - 1 )); then printf '\n'; fi
         done
     fi
     echo -e "$sep_line"
@@ -951,10 +990,24 @@ show_traffic() {
     echo -e ""
     echo -e " ${GREEN}0.${PLAIN} 返回上一页"
     echo -e ""
-    read -p "选项[0-6]: " c
-    if [[ "$c" != "0" ]]; then
-        echo -e ""
+    if [[ -t 0 && -t 1 ]]; then
+        printf '选项[0-6]: '
+        while true; do
+            IFS= read -r -t 5 c
+            read_status=$?
+            if (( read_status > 128 )); then
+                pending+="$c"
+                refresh_traffic_rows "$count"
+                continue
+            fi
+            (( read_status != 0 )) && return
+            c="$pending$c"
+            break
+        done
+    else
+        read -r -p "选项[0-6]: " c || return
     fi
+    if [[ "$c" != "0" ]]; then printf '\n'; fi
     case "$c" in
         1) show_traffic ;;
         2) set_traffic_quota ;;
@@ -1423,25 +1476,93 @@ reset_realm_rules() {
     fi
 }
 
+install_iptables_with_backup_apt_source() {
+    local os_id codename arch mirror tmp_dir source_file
+    local -a apt_opts
+    . /etc/os-release
+    os_id="$ID"
+    codename="${VERSION_CODENAME:-${UBUNTU_CODENAME:-}}"
+    arch=$(dpkg --print-architecture)
+    if [ -z "$codename" ]; then
+        echo -e "${RED}无法识别系统版本代号，不能选择备用软件源。${PLAIN}"
+        return 1
+    fi
+
+    case "$os_id" in
+        debian)
+            mirror="https://mirrors.tuna.tsinghua.edu.cn/debian"
+            ;;
+        ubuntu)
+            if [ "$arch" = "amd64" ] || [ "$arch" = "i386" ]; then
+                mirror="https://mirrors.tuna.tsinghua.edu.cn/ubuntu"
+            else
+                mirror="https://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports"
+            fi
+            ;;
+        *)
+            echo -e "${RED}暂不支持此系统自动选择备用 apt 源: $os_id${PLAIN}"
+            return 1
+            ;;
+    esac
+
+    tmp_dir=$(mktemp -d /tmp/forwarding-apt.XXXXXX) || return 1
+    mkdir -p "$tmp_dir/lists/partial"
+    source_file="$tmp_dir/sources.list"
+    printf 'deb %s %s main\n' "$mirror" "$codename" > "$source_file"
+    printf 'deb %s %s-updates main\n' "$mirror" "$codename" >> "$source_file"
+    if [ "$os_id" = "ubuntu" ]; then
+        printf 'deb %s %s-security main universe\n' "$mirror" "$codename" >> "$source_file"
+        # iptables-persistent 在 Ubuntu 的 universe 仓库中。
+        sed -i 's/ main$/ main universe/' "$source_file"
+    else
+        printf 'deb https://mirrors.tuna.tsinghua.edu.cn/debian-security %s-security main\n' "$codename" >> "$source_file"
+    fi
+
+    # 仅本次安装使用备用源及独立包索引，系统原有软件源不变。
+    apt_opts=(-o "Dir::Etc::sourcelist=$source_file"
+              -o 'Dir::Etc::sourceparts=-'
+              -o "Dir::State::lists=$tmp_dir/lists")
+    echo -e "${YELLOW}默认软件源失败，尝试临时备用源: $mirror${PLAIN}"
+    if apt-get "${apt_opts[@]}" update \
+        && DEBIAN_FRONTEND=noninteractive apt-get "${apt_opts[@]}" install -y iptables iptables-persistent nftables; then
+        rm -rf "$tmp_dir"
+        return 0
+    fi
+    rm -rf "$tmp_dir"
+    return 1
+}
+
 install_iptables_env() {
     echo -e "${YELLOW}安装/更新 iptables...${PLAIN}\n"
-    
+
     if [ -f /etc/debian_version ]; then
-        apt-get update && apt-get install -y iptables iptables-persistent
+        if ! { apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y iptables iptables-persistent nftables; }; then
+            if ! install_iptables_with_backup_apt_source; then
+                echo -e "${RED}iptables 安装失败，默认源和备用源均不可用。${PLAIN}"
+                return 1
+            fi
+        fi
+        if ! systemctl enable --now netfilter-persistent; then
+            echo -e "${RED}netfilter-persistent 启动失败。${PLAIN}"
+            return 1
+        fi
     elif [ -f /etc/redhat-release ]; then
-        yum install -y iptables iptables-services
-    fi
-    echo "" 
-    enable_forwarding
-    
-    if [ -f /etc/debian_version ]; then
-        systemctl enable --now netfilter-persistent
+        if ! yum install -y iptables iptables-services nftables; then
+            echo -e "${RED}yum 安装失败；此系统需要配置对应发行版的软件源。${PLAIN}"
+            return 1
+        fi
+        if ! systemctl enable --now iptables; then
+            echo -e "${RED}iptables 服务启动失败。${PLAIN}"
+            return 1
+        fi
     else
-        systemctl enable --now iptables
+        echo -e "${RED}不支持的发行版，无法安装 iptables。${PLAIN}"
+        return 1
     fi
-    
-    echo ""
+
+    enable_forwarding
     echo -e "${GREEN}iptables 安装完成！${PLAIN}"
+    return 0
 }
 
 add_iptables_rule() {
@@ -1894,9 +2015,14 @@ fi
 check_root
 set_shortcut
 
-if [ ! -f "$REALM_PATH" ]; then
-    install_realm
-    install_iptables_env
+if [ ! -x "$REALM_PATH" ]; then
+    install_realm || echo -e "${RED}realm 尚未安装，可在菜单中重试。${PLAIN}"
+fi
+
+if ! command -v iptables >/dev/null 2>&1 \
+    || ! command -v nft >/dev/null 2>&1 \
+    || { [ -f /etc/debian_version ] && ! command -v netfilter-persistent >/dev/null 2>&1; }; then
+    install_iptables_env || echo -e "${RED}iptables 尚未正确安装，可在菜单中重试。${PLAIN}"
 fi
 
 init_nftables
